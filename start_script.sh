@@ -1,11 +1,11 @@
 #!/bin/bash -l
 
 ##SBATCH --job-name=w2v   # create a short name for your job
-#SBATCH --nodes=1           #161
-#SBATCH --gres=gpu:1            # number of gpus per node
+#SBATCH --nodes=2           #161
+#SBATCH --gres=gpu:4            # number of gpus per node
 #SBATCH --cpus-per-task=32        # cpu-cores per task (>1 if multi-threaded tasks)
 #SBATCH --mem=256GB               # total memory per node 
-#SBATCH --time=0-00:18:00          # total run time limit (HH:MM:SS)
+#SBATCH --time=0-00:30:00          # total run time limit (HH:MM:SS)
 #SBATCH --ntasks-per-node=1
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_dbg                    #default
@@ -43,7 +43,7 @@ PROJECT="/leonardo_work/EUHPC_D01_040/kb-leonardo/${LABBIS}/swe-whisper-at-leona
 export CHECKPOINT_DIR="/leonardo_work/EUHPC_D01_040/kb-leonardo/${LABBIS}/swe-whisper-at-leonardo/checkpoints"
 export CONFIG_DIR="/leonardo_work/EUHPC_D01_040/kb-leonardo/${LABBIS}/swe-whisper-at-leonardo/configs"
 TARGET_DIR="/leonardo_work/EUHPC_D01_040/kb-leonardo/${LABBIS}/swe-whisper-at-leonardo/scripts"
-CONTAINER_PATH="/leonardo_work/EUHPC_D01_040/containers/whisper-sandbox"
+CONTAINER_PATH="/leonardo_work/EUHPC_D01_040/containers/whisper-sandbox-py22.08"
 LOGGING=$PROJECT/logs # Make sure to create logs/ before running this script
 
 echo "MASTER_ADDR" $MASTER_ADDR

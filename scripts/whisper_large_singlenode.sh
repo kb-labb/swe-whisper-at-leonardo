@@ -6,13 +6,15 @@ echo "GPUS_PER_NODE" $GPUS_PER_NODE
 echo "SLURM_JOB_NUM_NODES" $SLURM_JOB_NUM_NODES
 echo "MASTER_ADDR" $MASTER_ADDR
 echo "MASTER_PORT" $MASTER_PORT
+echo "config dir" $CONFIG_DIR
 
 WORLD_SIZE=$(($NPROC_PER_NODE*$SLURM_JOB_NUM_NODES))
 # node id of main process in each node. 0*4 = 0, 1*4 = 4, 2*4 = 8, 3*4 = 12, etc...
 NODE_ID=$(($SLURM_NODEID*$NPROC_PER_NODE)) 
 echo "WORLD_SIZE" $WORLD_SIZE
 
-python  scripts/run_speech_recognition_seq2seq.py \
+deepspeed scripts/run_speech_recognition_seq2seq.py \
+	--deepspeed=$CONFIG_DIR"/ds_config.json" \
 	--model_name_or_path="/leonardo_work/EUHPC_D01_040/models/whisper-tiny" \
 	--dataset_name="/leonardo_work/EUHPC_D01_040/data/google___fleurs" \
 	--language="swedish" \
