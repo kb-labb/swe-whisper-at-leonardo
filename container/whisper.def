@@ -1,7 +1,6 @@
 Bootstrap: docker
 # Nvidia ngc docker image
-#from: nvcr.io/nvidia/pytorch:23.12-py3
-from: python:3.10
+from: nvcr.io/nvidia/pytorch:22.08-py3
 
 # Environment variables
 %environment
@@ -21,15 +20,16 @@ from: python:3.10
 
     echo test
     pip3 install --upgrade pip
-    pip3 install   torch torchaudio --index-url https://download.pytorch.org/whl/cu118
     pip3 install   transformers
     pip3 install   datasets
-    pip3 install   librosa
+    #pip3 install   librosa
     pip3 install   jiwer
     pip3 install   evaluate>=0.3.0
     pip3 install   more-itertools
     pip3 install   tensorboard
     pip3 install   huggingface_hub
-    pip3 install   accelerate -U
-    #git config --global credential.helper store
+    pip3 install   accelerate 
+    pip3 install   deepspeed    
+    pip3 install   flops-profiler    
+#git config --global credential.helper store
     #huggingface-cli login
