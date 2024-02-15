@@ -46,7 +46,9 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
+from transformers.utils import is_flash_attn_2_available
 
+from deepspeed.profiling.flops_profiler import FlopsProfiler
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.32.0.dev0")
@@ -422,6 +424,7 @@ def main():
         revision=model_args.model_revision,
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
+        attn_implementation="flash_attention_2"
     )
 
     if model.config.decoder_start_token_id is None:
@@ -559,7 +562,6 @@ def main():
         data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
     )
-
     # 12. Training
     if training_args.do_train:
         checkpoint = None
@@ -567,6 +569,7 @@ def main():
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
+
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the feature extractor too for easy upload
 
