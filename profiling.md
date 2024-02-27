@@ -2,9 +2,9 @@
 | Batch size     | Memory [GB]   | GPU Utilization [%]| FLOPs per GPU [TFLOPS] | # nodes (global bs 1024)| Train time 500 steps (min)| 
 | -------------- | ------------- |------------------- | ---------------------- |-------------------------| ------------------------- | 
 | 16             | 11            | 0-100              | 48                     | 16                      | -                         | 
-| 32             | 15            | 0-100              | 56                     | 8                       | -                         |  
+| 32             | 15            | 0-100              | 56                     | 8                       | running now                         |  
 | 64             | 21            | 0-100              | 61                     | 4                       | 79                        | 
-| 128            | 37            | 0-100              | 81                     | 2                       | running (cancelled after 2 h)                   | 
+| 128            | 37            | 0-100              | 81                     | 2                       | 149                       | 
 | 256            | OOM           | -                  | -                      | -                       | -                         | 
 
 
@@ -13,19 +13,19 @@
 | Batch size     | Memory [GB]   | GPU Utilization [%]| FLOPs per GPU [TFLOPS] | # nodes (global bs 1024)| Train time 500 steps (min)|
 | -------------- | ------------- |------------------- | ---------------------- |-------------------------| ------------------------- | 
 | 16             | 8             | 35                 | 33                     | 16                      | -                         |                   
-| 32             | 15            | 95-100             | 49                     | 8                       | -                         |                   
-| 64             | 21            | 20-10              | 65                     | 4                       | -                         |                  
+| 32             | 15            | 95-100             | 49                     | 8                       | running now               |                   
+| 64             | 21            | 20-10              | 65                     | 4                       | running now               |                  
 | 128            | 37            | 20-100             | 78                     | 2                       | 85                        |                   
-| 256            | 47            | 0-100              | 77                     | 1                       | running (cancelled after 2 h) GG   |   
+| 256            | 47            | 0-100              | 77                     | 1                       | 157                       |   
 
 ## Whisper-small
 | Batch size     | Memory [GB]   | GPU Utilization [%]| FLOPs per GPU [TFLOPS] | # nodes (global bs 1024)| Train time 500 steps (min)|
 | -------------- | ------------- |------------------- | ---------------------- | ------------------------| ------------------------- |
 | 16             | 6             | 30-70              | 33                     | 16                      | -                         |                   
-| 32             | 8-10          | 95-100             | 44                     | 8                       | -                         |                   
-| 64             | 12-16         | 0-100              | 57                     | 4                       | -                         |                   
-| 128            | 17/20/27      | 0-100              | 66                     | 2                       |                           |                   
-| 256            | 31/43         | 0-100              | 67                     | 1                       |                           |   
+| 32             | 8-10          | 95-100             | 44                     | 8                       | running now                          |                   
+| 64             | 12-16         | 0-100              | 57                     | 4                       | running now                          |                   
+| 128            | 17/20/27      | 0-100              | 66                     | 2                       | running now                          |                   
+| 256            | 31/43         | 0-100              | 67                     | 1                       | running now                          |   
 
 ## Whisper-base
 | Batch size     | Memory [GB]   | GPU Utilization [%]| FLOPs per GPU [TFLOPS] | # nodes (global bs 1024)| Train time 500 steps (min)|
