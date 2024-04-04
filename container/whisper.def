@@ -1,6 +1,7 @@
 Bootstrap: docker
 # Nvidia ngc docker image
-from: nvcr.io/nvidia/pytorch:22.08-py3
+from: nvcr.io/nvidia/pytorch:23.07-py3
+#from: python:3.10
 
 # Environment variables
 %environment
@@ -9,7 +10,7 @@ from: nvcr.io/nvidia/pytorch:22.08-py3
 # Install dependencies
 %post
     # install build tools
-    DEBIAN_FRONTEND=noninteractive apt-get -yqq update && DEBIAN_FRONTEND=noninteractive apt install -yqq build-essential cmake libboost-system-dev libboost-thread-dev libboost-program-options-dev libboost-test-dev libeigen3-dev zlib1g-dev libbz2-dev liblzma-dev
+    DEBIAN_FRONTEND=noninteractive apt-get -yqq update && DEBIAN_FRONTEND=noninteractive apt install -yqq build-essential cmake libboost-system-dev libboost-thread-dev libboost-program-options-dev libboost-test-dev libeigen3-dev zlib1g-dev libbz2-dev liblzma-dev 
 
     #install ffmpeg
     DEBIAN_FRONTEND=noninteractive apt-get -y install ffmpeg
@@ -20,7 +21,13 @@ from: nvcr.io/nvidia/pytorch:22.08-py3
 
     echo test
     pip3 install --upgrade pip
+    #pip3 install   torch torchaudio --index-url https://download.pytorch.org/whl/cu118
     pip3 install   transformers
+    pip3 install   packaging
+    pip3 install   ninja
+    ninja --version
+    echo $?
+    pip3 install   flash-attn==2.1.0 --no-build-isolation
     pip3 install   datasets
     #pip3 install   librosa
     pip3 install   jiwer
@@ -31,5 +38,5 @@ from: nvcr.io/nvidia/pytorch:22.08-py3
     pip3 install   accelerate 
     pip3 install   deepspeed    
     pip3 install   flops-profiler    
-#git config --global credential.helper store
+    #git config --global credential.helper store
     #huggingface-cli login
