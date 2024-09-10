@@ -430,13 +430,13 @@ def main():
         if custom_args.multi_dataset:
             raw_datasets["train"] = all_datasets["train"]
         else:
-            raw_datasets = load_dataset("parquet", data_files={'train': custom_args.train_dataset_name, 'eval': custom_args.test_dataset_name})
+            raw_datasets = load_dataset("parquet", data_files={'train': data_args.train_dataset_name, 'eval': data_args.test_dataset_name})
 
     if training_args.do_eval:
         if custom_args.multi_dataset:
             raw_datasets["eval"] = all_datasets[data_args.eval_split_name]
         else:
-            raw_datasets = load_dataset("parquet", data_files={'train': custom_args.train_dataset_name, 'eval': custom_args.test_dataset_name})
+            raw_datasets = load_dataset("parquet", data_files={'train': data_args.train_dataset_name, 'eval': data_args.test_dataset_name})
 
 
     if data_args.audio_column_name not in next(iter(raw_datasets.values())).column_names:
