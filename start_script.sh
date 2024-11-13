@@ -1,21 +1,29 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=whis   # create a short name for your job
-#SBATCH --nodes=1           #161
+#SBATCH --job-name=whisper-tiny   # create a short name for your job
+#SBATCH --nodes=1          #161
 #SBATCH --gres=gpu:4            # number of gpus per node
 #SBATCH --cpus-per-task=32        # cpu-cores per task (>1 if multi-threaded tasks)
-#SBATCH --mem=256GB               # total memory per node 
-#SBATCH --time=0-00:30:00          # total run time limit (HH:MM:SS)
+#SBATCH --mem=400GB               # total memory per node 
+#SBATCH --time=0-24:00:00          # total run time limit (HH:MM:SS)
 #SBATCH --ntasks-per-node=1
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal                    #default
-#####SBATCH --qos=boost_qos_dbg                    #default
-#SBATCH --account=EUHPC_D01_040
-#SBATCH --output=logs/sbatch-%J.log
-
+#SBATCH --account=EUHPC_A01_006       #SBATCH --account=EUHPC_A01_006
+#SBATCH --output=/leonardo_work/EUHPC_A01_006/experiments_whisper/logs/whisper-large/sbatch_logs/sbatch-%J.log
+#SBATCH --exclude=lrdn1765,lrdn3032,lrdn2751,lrdn0959,lrdn1072,lrdn2031,lrdn0970,lrdn1753,lrdn1636,lrdn3146,lrdn2631
+#SBATCH --requeue
+# Example how to launch the job: 
+# sbatch start_script_whisper.sh scripts/whisper_large_multinode.sh
 
 module purge
-module load singularity
+
+# Automatically resubmit the job unless it is finished
+#if [ ! -f "finished_whisper" ] ; then
+#	sbatch --dependency=afterany:$SLURM_JOBID start_script_whisper.sh scripts/whisper_large_multinode.sh
+#else
+#	exit 0
+#fi
 
 pwd
 addr=$(/bin/hostname -s)
@@ -35,18 +43,17 @@ export HYDRA_FULL_ERROR=1
 # more details.
 # export NCCL_CROSS_NIC=1
 # export NCCL_IB_GID_INDEX=3  
+export NCCL_IB_TIMEOUT=22
+# export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 DATETIME=$(date +'date_%y-%m-%d_time_%H-%M-%S')
 
 TRAIN_SCRIPT=$1
-LABBIS=$2 #labbis is you! pass your name to the start_script command
-PROJECT="/leonardo_work/EUHPC_D01_040/kb-leonardo/${LABBIS}/swe-whisper-at-leonardo"
-export CHECKPOINT_DIR="/leonardo_work/EUHPC_D01_040/kb-leonardo/${LABBIS}/swe-whisper-at-leonardo/checkpoints"
-export CONFIG_DIR="/leonardo_work/EUHPC_D01_040/kb-leonardo/${LABBIS}/swe-whisper-at-leonardo/configs"
-TARGET_DIR="/leonardo_work/EUHPC_D01_040/kb-leonardo/${LABBIS}/swe-whisper-at-leonardo/scripts"
-CONTAINER_PATH="/leonardo_work/EUHPC_D01_040/containers/whisper-flash-new"
-#CONTAINER_PATH="/leonardo_work/EUHPC_D01_040/containers/whisper-sandbox-py22.08"
-LOGGING=$PROJECT/logs # Make sure to create logs/ before running this script
+PROJECT="/leonardo_work/EUHPC_A01_006/experiments_whisper"
+export CHECKPOINT_DIR="/leonardo_work/EUHPC_A01_006/models/whisper-tiny"
+export CONFIG_DIR="${PROJECT}/configs"
+CONTAINER_PATH="/leonardo_work/EUHPC_A01_006/containers/whisper-flash-new"
+LOGGING=$PROJECT/logs/whisper-tiny # Make sure to create logs/ before running this script
 
 echo "MASTER_ADDR" $MASTER_ADDR
 echo "MASTER_PORT" $MASTER_PORT
@@ -60,15 +67,29 @@ echo "SLURM_NODEID" $SLURM_NODEID
 echo "SLURM_PROCID" $SLURM_PROCID
 echo "SLURM_GPUS" $SLURM_GPUS
 echo "SLURM_GPUS_PER_NODE" $SLURM_GPUS_PER_NODE
-echo "WORK" $WORK
+echo "CHECKPOINT_DIR" $CHECKPOINT_DIR
 
-cmd="srun -l --output=$LOGGING/${SLURM_JOB_NAME}_${DATETIME}.log \
-      singularity exec --nv -B $WORK $CONTAINER_PATH bash $TARGET_DIR/$TRAIN_SCRIPT"
+ srun error handling:
+ --wait=60: wait 60 sec after the first task terminates before terminating all remaining tasks
+ --kill-on-bad-exit=1: terminate a step if any task exits with a non-zero exit code
+SRUN_ARGS=" \
+    --wait=60 \
+    --kill-on-bad-exit=1 \
+    --jobid $SLURM_JOB_ID \
+    --label \
+    --output=$LOGGING/${SLURM_JOB_NAME}_${DATETIME}.log
+    "
+
+
+cmd="srun $SRUN_ARGS \
+      singularity exec --nv -B /leonardo_work/EUHPC_A01_006,/leonardo_scratch/large/userexternal/lvesterb,/leonardo_scratch/large/userexternal/lvesterb $CONTAINER_PATH bash $PROJECT/$TRAIN_SCRIPT"
 
 echo "Executing:"
 echo $cmd
 
 $cmd
+
+# touch finished_whisper
 
 set +x
 exit 0
