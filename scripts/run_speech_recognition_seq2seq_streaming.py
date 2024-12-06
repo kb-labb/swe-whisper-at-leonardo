@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 # Copyright 2022 The HuggingFace Team. All rights reserved.
+# Additions and modifications Copyright 2024 National Library of Sweden. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,7 +33,9 @@ from os.path import isfile, join
 import datasets
 import torch
 from datasets import DatasetDict, IterableDatasetDict, interleave_datasets, load_dataset
+from datasets.distributed import split_dataset_by_node
 from torch.utils.data import IterableDataset
+
 
 import evaluate
 import transformers
@@ -55,11 +58,16 @@ from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
+import random
+import tokenizers
+from tokenizers.models import BPE
+
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.25.0.dev0")
 
 require_version("datasets>=1.18.2", "To fix: pip install -r examples/pytorch/speech-recognition/requirements.txt")
+datasets.builder.has_sufficient_disk_space = lambda needed_bytes, directory='.': True
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +130,10 @@ class ModelArguments:
     suppress_tokens: List[int] = field(
         default=None, metadata={"help": "A list of tokens that will be suppressed at generation."}
     )
-    model_index_name: str = field(default=None, metadata={"help": "Pretty name for the model card."})
+    model_index_name: str = field(default=None, metadata={"help": "Pretty name for the model card."}
+    )
+    activation_dropout: float = field(default=0.0, metadata={"help": "Dropout rate for the activations."})
+    max_length: int = field(default=448, metadata={"help": "The maximum length of the tokenized input text + special tokens."})
 
 
 @dataclass
@@ -163,6 +174,7 @@ class DataTrainingArguments:
         default="audio",
         metadata={"help": "The name of the dataset column containing the audio data. Defaults to 'audio'"},
     )
+
     text_column_name: str = field(
         default="text",
         metadata={"help": "The name of the dataset column containing the text data. Defaults to 'text'"},
@@ -217,7 +229,7 @@ class DataTrainingArguments:
         metadata={"help": "Task, either `transcribe` for speech recognition or `translate` for speech translation."},
     )
     shuffle_buffer_size: Optional[int] = field(
-        default=500,
+        default=20,
         metadata={
             "help": (
                 "The number of streamed examples to download before shuffling them. The large the buffer, "
@@ -229,6 +241,8 @@ class DataTrainingArguments:
         default=True,
         metadata={"help": "Whether to use streaming mode to load and pre-process the data."},
     )
+    
+    
 
 @dataclass
 class CustomTrainingArguments():
@@ -236,8 +250,21 @@ class CustomTrainingArguments():
     Custom arguments for training with multiple datasets.
     """
     
+    node_id: int = field(default=None, metadata={"help": "Rank of the node."})
+    proc_id: int = field(default=None, metadata={"help": "Id of the process."})
     multi_dataset: bool = field(default=False, metadata={"help": "Whether to train with multiple datasets."})
     
+    train_with_timestamps: bool = field(default=False, metadata={"help": "Whether to train with timestamps or not"})  
+    stamps_probs: float = field(default=0.0, metadata={"help" :"Provide probability for choosing labels with timestamps"})
+    truncation: bool = field(default=True, metadata={"help": "Whether to truncate the input text to max_length"})
+    
+    
+    bpe_dropout: float = field(default=0.0, metadata={"help":"BPE dropout rate. Makes the tokenizer use differnt subwords to encode the same word. Good for regularization to prevent overfitting."})
+
+    cache_dir_tokenizer: Optional[str] = field(
+        default=None,
+        metadata={"help": "Where to store the pretrained models downloaded from huggingface.co"},
+    )
     smdb_dataset: str = field(default=None, metadata={"help": "Provide the path to the smdb parquet dataset"})
     svt_dataset: str = field(default=None, metadata={"help": "Provide the path to the svt parquet dataset"})
     youtube_dataset: str = field(default=None, metadata={"help": "Provide the path to the youtube parquet dataset"})
@@ -252,33 +279,77 @@ class CustomTrainingArguments():
 
 
 @dataclass
-class DataCollatorSpeechSeq2SeqWithPadding:
+class DataCollatorSpeechSeq2SeqWithBPEDropoutPadding:
     """
     Data collator that will dynamically pad the inputs received.
     Args:
-        processor ([`WhisperProcessor`])
-            The processor used for processing the data.
+        feature_extractor (`any`)
+            The feature extractor that will extract features from the data.
+        tokenizer (`any`)
+            The BPE dropout tokenizer used to tokenize text.
         decoder_start_token_id (`int`)
             The begin-of-sentence of the decoder.
+        train_with_timestamps (`bool`)
+            Whether to use timestamp labels during training.
+        timestamp_probability (`float`)
+            Probability of using timestamp labels.
     """
-
-    processor: Any
+    feature_extractor: Any
+    tokenizer: Any
     decoder_start_token_id: int
+    train_with_timestamps: bool = False
+    timestamp_probability: float = 0.8
+    seed: int = None  # seed for reproducibility
+    truncation: bool = True
+    max_length: int = 448
+    generation_max_length: int = 448
 
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+        if self.seed is not None:
+            random.seed(self.seed)  
         # split inputs and labels since they have to be of different lengths and need
         # different padding methods
-        model_input_name = self.processor.model_input_names[0]
+        model_input_name = "input_features"
         input_features = [{model_input_name: feature[model_input_name]} for feature in features]
-        label_features = [{"input_ids": feature["labels"]} for feature in features]
 
-        batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
+        labels = []
+        attention_masks = []
+        if self.train_with_timestamps:
+            texts = [feature["text"] for feature in features]
+            texts_with_timestamps = [feature["text_timestamps"] for feature in features]
+            # BPE dropout on the fly introduces randomness, and will lead to longer tokenized sequences 
+            # than in our pre-processing step. We need to handle when `len(input_ids) > max_length` 
+            # with truncation and max_length.
+            self.tokenizer.set_prefix_tokens(predict_timestamps=False)
+            tokenized_texts = self.tokenizer(texts, truncation=self.truncation, max_length=self.max_length)
+            self.tokenizer.set_prefix_tokens(predict_timestamps=True)
+            tokenized_text_timestamps = self.tokenizer(texts_with_timestamps, truncation=self.truncation, max_length=self.max_length)
+            
+            for i, feature in enumerate(features):
+                # Use timestamp labels with probability `timestamp_probability` whenever observation is suitable
+                if (random.random() < self.timestamp_probability) and feature["stage2_whisper_timestamps"]:
+                    labels.append(tokenized_text_timestamps["input_ids"][i])
+                    attention_masks.append(tokenized_text_timestamps["attention_mask"][i])
+                else:
+                    labels.append(tokenized_texts["input_ids"][i])
+                    attention_masks.append(tokenized_texts["attention_mask"][i])
 
-        labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
+            # Only labels necessary with this approach
+            labels = self._pad_labels(labels)
+        else:
+            texts = [feature["text"] for feature in features]
+            self.tokenizer.set_prefix_tokens(predict_timestamps=False)
+            tokenized_texts = self.tokenizer(texts, truncation=self.truncation, padding=True, max_length=self.max_length, return_tensors="pt")
+            
+            labels = tokenized_texts["input_ids"]
+            attention_masks = tokenized_texts["attention_mask"]
 
-        # replace padding with -100 to ignore loss correctly
-        labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
+            # replace padding with -100 to ignore loss correctly
+            labels = labels.masked_fill(attention_masks.ne(1), -100)
 
+
+        batch = self.feature_extractor.pad(input_features, return_tensors="pt")
+        
         # if bos token is appended in previous tokenization step,
         # cut bos token here as it's append later anyways
         if (labels[:, 0] == self.decoder_start_token_id).all().cpu().item():
@@ -288,9 +359,22 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
         return batch
 
+    def _pad_labels(self, labels: List[List[int]]) -> torch.Tensor:
+        """
+        Regular texts and texts with timestamps are processed independently and have different lengths 
+        when combined. This function pads the combined labels to the same length, inserting -100 in 
+        the labels to ignore the loss correctly. 
 
+        NOTE: Label attention masks are not included in batch output returned by collator, 
+        so we don't need to pad and return them using this approach.
+        """
+        labels = [torch.tensor(label) for label in labels]
+        labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=-100)
+
+        return labels
+        
     
-def load_maybe_streaming_dataset(dataset_name, split, streaming=True):
+def load_maybe_streaming_dataset(dataset_name, split, streaming=False, buffer_size=20, cache_dir="/leonardo_scratch/large/userexternal/jsikora0"):
     """
     Utility function to load a dataset in streaming mode. For datasets with multiple splits,
     each split is loaded individually and then splits combined by taking alternating examples from
@@ -300,11 +384,19 @@ def load_maybe_streaming_dataset(dataset_name, split, streaming=True):
     split_files = [join(split_path, f) for f in listdir(split_path) if isfile(join(split_path, f))]
 
     # Load dataset for the specified split only
-    dataset = load_dataset(
-        "parquet",
-        data_files={split: split_files},
-        streaming=streaming
-    )[split]  
+    if streaming == True:
+        dataset = load_dataset(
+            "parquet",
+            data_files={split: split_files},
+            streaming=streaming
+        )[split] 
+        dataset = dataset.shuffle(buffer_size=buffer_size)  # shuffles the shards order and use a shuffle buffer when you start iterating
+    else:
+        dataset = load_dataset(
+            "parquet",
+            data_files={split: split_files},
+            cache_dir=cache_dir
+        )[split]  
 
     return dataset
 
@@ -343,17 +435,20 @@ def main():
 
     logger.setLevel(logging.INFO if is_main_process(training_args.local_rank) else logging.WARN)
 
+    logger.info(f"Node ID: {custom_args.node_id}. Process ID: {custom_args.proc_id}")
+
     # Log on each process the small summary:
     logger.warning(
         f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
         f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
     )
-    logger.info(f"Training/evaluation parameters {training_args}")
+
+    if custom_args.node_id == 0 and custom_args.proc_id == 0:
+        logger.info(f"Training/evaluation parameters {training_args}")
 
     # Set the verbosity to info of the Transformers logger (on main process only):
     if is_main_process(training_args.local_rank):
         transformers.utils.logging.set_verbosity_info()
-    logger.info("Training/evaluation parameters %s", training_args)
 
     # 3. Detecting last checkpoint and eventually continue from last checkpoint
     last_checkpoint = None
@@ -370,46 +465,47 @@ def main():
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
             )
 
+    # If main process  log training args
+    if custom_args.node_id == 0 and custom_args.proc_id == 0:
+        logger.info("Training/evaluation parameters %s", training_args)
+        # Print version of transformers
+        logger.info("Transformers version: %s", transformers.__version__)
+        logger.info("Datasets version: %s", datasets.__version__)
+        logger.info("Torch version: %s", torch.__version__)
+        logger.info("Tokenizers version: %s", tokenizers.__version__)
+
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
     # 4. Load dataset
-    raw_datasets = IterableDatasetDict() if data_args.streaming else DatasetDict()
+    vectorized_datasets = IterableDatasetDict() if data_args.streaming else DatasetDict()
 
     if training_args.do_train:
-        raw_datasets["train"] = load_maybe_streaming_dataset(
+        vectorized_datasets["train"] = load_maybe_streaming_dataset(
             data_args.dataset_name,
             split="train",
             streaming=data_args.streaming,
+            buffer_size=data_args.shuffle_buffer_size,
+            cache_dir=model_args.cache_dir,
         )
-        
-    print(raw_datasets)
+    
+
 
     if training_args.do_eval:
-        raw_datasets["eval"] = load_maybe_streaming_dataset(
+        vectorized_datasets["test"] = load_maybe_streaming_dataset(
             data_args.dataset_name,
             split="test",
             streaming=data_args.streaming,
+            buffer_size=data_args.shuffle_buffer_size,
+            cache_dir=model_args.cache_dir,
         )
     
-    print(raw_datasets) 
+    if custom_args.node_id == 0 and custom_args.proc_id == 0:
+        print(vectorized_datasets)
 
+   # logging.info(f"Splitting dataset by node: {training_args.local_rank}")
+   # vectorized_datasets["train"] = datasets.distributed.split_dataset_by_node(vectorized_datasets["train"], rank=training_args.local_rank, world_size=training_args.world_size)
 
-    raw_datasets_features = list(next(iter(raw_datasets.values())).features.keys())
-
-    if data_args.audio_column_name not in raw_datasets_features:
-        raise ValueError(
-            f"--audio_column_name '{data_args.audio_column_name}' not found in dataset '{data_args.dataset_name}'. "
-            "Make sure to set `--audio_column_name` to the correct audio column - one of "
-            f"{', '.join(raw_datasets_features)}."
-        )
-
-    if data_args.text_column_name not in raw_datasets_features:
-        raise ValueError(
-            f"--text_column_name {data_args.text_column_name} not found in dataset '{data_args.dataset_name}'. "
-            "Make sure to set `--text_column_name` to the correct text column - one of "
-            f"{', '.join(raw_datasets_features)}."
-        )
 
     # 5. Load pretrained model, tokenizer, and feature extractor
     #
@@ -423,6 +519,7 @@ def main():
     )
 
     config.update({"forced_decoder_ids": model_args.forced_decoder_ids, "suppress_tokens": model_args.suppress_tokens})
+    config.update({"activation_dropout": model_args.activation_dropout})
 
     if training_args.gradient_checkpointing:
         config.update({"use_cache": False})
@@ -439,14 +536,41 @@ def main():
         use_fast=model_args.use_fast_tokenizer,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
+        add_prefix_space=True,
+        dropout=custom_args.bpe_dropout,
     )
+    
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
         model_args.model_name_or_path,
         config=config,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
+        # Flash attention?
     )
+    
+    inference_tokenizer = tokenizer
+    
+    # 3. Regularization settings.
+    #   a) BPE dropout in the tokenizer (randomly uses different subwords to encode the same word)
+    if custom_args.bpe_dropout > 0:
+            # Need a workaround to successfully load the tokenizer with BPE dropout.
+            # See https://github.com/huggingface/tokenizers/issues/201#issue-584182286
+            # Should only be used for training, not for inference/eval.
+            logger.info(f"cache_dir_tokenizer: {custom_args.cache_dir_tokenizer}")
+
+            with training_args.main_process_first():
+                if is_main_process(training_args.local_rank):
+                    workaround_files = tokenizer._tokenizer.model.save(custom_args.cache_dir_tokenizer, "training_tokenizer")
+
+            workaround_tokenizer = os.path.join(custom_args.cache_dir_tokenizer, "training_tokenizer-vocab.json")
+            workaround_merges = os.path.join(custom_args.cache_dir_tokenizer, "training_tokenizer-merges.txt")
+            workaround_files = [workaround_tokenizer, workaround_merges]
+            tokenizer._tokenizer.model = BPE.from_file(*workaround_files, dropout=custom_args.bpe_dropout)
+    
+    #tokenizer.set_prefix_tokens(
+    #        language=data_args.language, task=data_args.task
+    #    )  
 
     if model.config.decoder_start_token_id is None:
         raise ValueError("Make sure that `config.decoder_start_token_id` is correctly defined")
@@ -461,77 +585,16 @@ def main():
         # We only need to set the task id when the language is specified (i.e. in a multilingual setting)
         tokenizer.set_prefix_tokens(language=data_args.language, task=data_args.task)
 
-#    # 6. Resample speech dataset if necessary
-#    dataset_sampling_rate = next(iter(raw_datasets.values())).features[data_args.audio_column_name].sampling_rate
-#    if dataset_sampling_rate != feature_extractor.sampling_rate:
-#        raw_datasets = raw_datasets.cast_column(
-#            data_args.audio_column_name, datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
-#        )
-#
-#    # 7. Preprocessing the datasets.
-#    # We need to read the audio files as arrays and tokenize the targets.
-#    max_input_length = data_args.max_duration_in_seconds * feature_extractor.sampling_rate
-#    min_input_length = data_args.min_duration_in_seconds * feature_extractor.sampling_rate
-#    audio_column_name = data_args.audio_column_name
-#    text_column_name = data_args.text_column_name
-#    model_input_name = feature_extractor.model_input_names[0]
-#    do_lower_case = data_args.do_lower_case
-#    do_remove_punctuation = data_args.do_remove_punctuation
+
     normalizer = BasicTextNormalizer()  # 'official' text normalizer from OpenAI
 #
 #    if data_args.max_train_samples is not None:
-#        raw_datasets["train"] = (
-#            raw_datasets["train"].take(data_args.max_train_samples)
+#        vectorized_datasets["train"] = (
+#            vectorized_datasets["train"].take(data_args.max_train_samples)
 #            if data_args.streaming
-#            else raw_datasets["train"].select(range(data_args.max_train_samples))
+#            else vectorized_datasets["train"].select(range(data_args.max_train_samples))
 #        )
-#
-#    if data_args.max_eval_samples is not None:
-#        raw_datasets["eval"] = (
-#            raw_datasets["eval"].take(data_args.max_eval_samples)
-#            if data_args.streaming
-#            else raw_datasets["eval"].select(range(data_args.max_eval_samples))
-#        )
-#
-#    def prepare_dataset(batch):
-#        # process audio
-#        sample = batch[audio_column_name]
-#        inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
-#        # process audio length
-#        batch[model_input_name] = inputs.get(model_input_name)[0]
-#        batch["input_length"] = len(sample["array"])
-#
-#        # process targets
-#        input_str = batch[text_column_name].lower() if do_lower_case else batch[text_column_name]
-#        if do_remove_punctuation:
-#            input_str = normalizer(input_str).strip()
-#        batch["labels"] = tokenizer(input_str).input_ids
-#        return batch
-#
-#    with training_args.main_process_first(desc="dataset map pre-processing"):
-#        vectorized_datasets = raw_datasets.map(
-#            prepare_dataset,
-#            remove_columns=raw_datasets_features,
-#        ).with_format("torch")
-#
-#        if training_args.do_train and data_args.streaming:
-#            # manually shuffle if streaming (done by the trainer for non-streaming)
-#            vectorized_datasets["train"] = vectorized_datasets["train"].shuffle(
-#                buffer_size=data_args.shuffle_buffer_size,
-#                seed=training_args.seed,
-#            )
-#
-#    # filter training data that is shorter than min_input_length or longer than
-#    # max_input_length
-#    def is_audio_in_length_range(length):
-#        return min_input_length < length < max_input_length
-#
-#    if training_args.do_train:
-#        vectorized_datasets["train"] = vectorized_datasets["train"].filter(
-#            is_audio_in_length_range,
-#            input_columns=["input_length"],
-#        )
-    vectorized_datasets = raw_datasets
+
     
     #dataloader_train = StatefulDataLoader(vectorized_datasets["train"], batch_size=32, num_workers=4)
     #dataloader_eval = StatefulDataLoader(vectorized_datasets["eval"], batch_size=32, num_workers=4)
@@ -544,37 +607,57 @@ def main():
     def compute_metrics(pred):
         pred_ids = pred.predictions
 
-        pred.label_ids[pred.label_ids == -100] = tokenizer.pad_token_id
+        pred.label_ids[pred.label_ids == -100] = inference_tokenizer.pad_token_id
 
-        pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+        pred_str = inference_tokenizer.batch_decode(pred_ids, skip_special_tokens=True, decode_with_timestamps=False)
         # we do not want to group tokens when computing the metrics
-        label_str = tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True)
+        label_str = inference_tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True, decode_with_timestamps=False)
 
         if do_normalize_eval:
             pred_str = [normalizer(pred) for pred in pred_str]
             label_str = [normalizer(label) for label in label_str]
             # filtering step to only evaluate the samples that correspond to non-zero references:
-            pred_str = [pred_str[i] for i in range(len(pred_str)) if len(label_str[i]) > 0]
-            label_str = [label_str[i] for i in range(len(label_str)) if len(label_str[i]) > 0]
+            #pred_str = [pred_str[i] for i in range(len(pred_str)) if len(label_str[i]) > 0]
+            #label_str = [label_str[i] for i in range(len(label_str)) if len(label_str[i]) > 0]
+            filtered_data = [(label, pred) for label, pred in zip(label_str, pred_str) if len(pred.strip()) > 0]
+            label_str, pred_str = zip(*filtered_data)
+            filtered_data = [(label, pred) for label, pred in zip(label_str, pred_str) if len(label.strip()) > 0]
+            label_str, pred_str = zip(*filtered_data)
+            
+            assert len(pred_str) == len(label_str), "The number of predictions and reference texts should be the same."
+
+            # Filter out entires from both pred_str and label_str, when label_str contains "<|nospeech|>"
+            pred_str = [pred_str[i] for i in range(len(pred_str)) if " <|nospeech|>" not in label_str[i]]
+            label_str = [label_str[i] for i in range(len(label_str)) if " <|nospeech|>" not in label_str[i]]
+
+            if custom_args.node_id == 0 and custom_args.proc_id == 0:
+                logger.info(f"len label_str after filtering {len(label_str)}")
+                logger.info(f"len pred_str after filtering {len(pred_str)}")
 
         wer = 100 * metric.compute(predictions=pred_str, references=label_str)
 
         return {"wer": wer}
 
     # 9. Create a single speech processor
+    logger.info("Creating processor on Main Process First")
     with training_args.main_process_first():
         if is_main_process(training_args.local_rank):
             # save feature extractor, tokenizer and config
             feature_extractor.save_pretrained(training_args.output_dir)
-            tokenizer.save_pretrained(training_args.output_dir)
+            inference_tokenizer.save_pretrained(training_args.output_dir)
             config.save_pretrained(training_args.output_dir)
 
-    processor = AutoProcessor.from_pretrained(training_args.output_dir)
-
     # 10. Define data collator
-    data_collator = DataCollatorSpeechSeq2SeqWithPadding(
-        processor=processor,
+    data_collator = DataCollatorSpeechSeq2SeqWithBPEDropoutPadding(
+        feature_extractor=feature_extractor,
+        tokenizer=tokenizer,
         decoder_start_token_id=model.config.decoder_start_token_id,
+        train_with_timestamps=custom_args.train_with_timestamps,
+        timestamp_probability=custom_args.stamps_probs,
+        seed=training_args.seed,
+        truncation=custom_args.truncation,
+        max_length=model_args.max_length,
+        generation_max_length=training_args.generation_max_length,
     )
 
     # 11. Configure Trainer
@@ -587,18 +670,30 @@ def main():
             elif isinstance(train_dataloader.dataset, IterableDataset):
                 train_dataloader.dataset.set_epoch(train_dataloader.dataset.epoch + 1)
 
-    shuffled_vectorized_datasets = vectorized_datasets.shuffle(seed=42, buffer_size=100) 
+    train_dataset = vectorized_datasets["train"]
+    valid_dataset = vectorized_datasets["test"]
+
+    if data_args.max_eval_samples is not None:
+        valid_dataset = (
+            valid_dataset.take(data_args.max_eval_samples)
+            if data_args.streaming
+            else valid_dataset.select(range(data_args.max_eval_samples))
+        )
+
+    # Remove columns labels_timestamps, data_source, stage2_whisper_timestamps, audio_path, duration, text_timestamps, is_silence, text.
+    valid_dataset = valid_dataset.remove_columns(["data_source", "audio_path", "duration", "is_silence",])
+
     # # checkpoint
     # state_dict = dataloader.state_dict()  # uses iterable_dataset.state_dict() under the hood
     # # resume from checkpoint
     # dataloader.load_state_dict(state_dict)  # uses iterable_dataset.load_state_dict() under the hood
 
-    # Initialize Trainer  
+    # Initialize Trainer
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
-        train_dataset=shuffled_vectorized_datasets["train"] if training_args.do_train else None,
-        eval_dataset=shuffled_vectorized_datasets["eval"] if training_args.do_eval else None,
+        train_dataset=train_dataset.shuffle(seed=training_args.seed, buffer_size=data_args.shuffle_buffer_size) if data_args.streaming else train_dataset,
+        eval_dataset=valid_dataset.shuffle(seed=training_args.seed, buffer_size=data_args.shuffle_buffer_size) if data_args.streaming else valid_dataset,
         tokenizer=feature_extractor,
         data_collator=data_collator,
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
