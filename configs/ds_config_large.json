@@ -7,9 +7,6 @@
         "hysteresis": 2,
         "min_loss_scale": 1
     },
-    "bf16": {
-        "enabled": "auto"
-    },
     "optimizer": {
         "type": "AdamW",
         "params": {
@@ -18,14 +15,6 @@
             "eps": "auto",
             "weight_decay": "auto"
         }
-    },
-    "flops_profiler": {
-        "enabled": false,
-        "profile_step": 9,
-        "module_depth": -1,
-        "top_modules": 1,
-        "detailed": true,
-        "output_file": "profiler_1node_step9_large_bs64_adafactor.txt"
     },
     "scheduler": {
         "type": "WarmupDecayLR",
