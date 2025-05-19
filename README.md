@@ -54,4 +54,8 @@ To launch a job, you can issue the following command:
 sbatch --job-name="whisper-large" start_script_whisper_large.sh scripts/whisper_large_multinode.sh 
 ```
 
-where `whisper_large_multinode.sh` is a positional argument to `start_script_whisper_large.sh`, which should point to one of the training scripts in `scripts/`. . 
+where `whisper_large_multinode.sh` is a positional argument to `start_script_whisper_large.sh`, which should point to one of the training scripts in `scripts/`. 
+These scripts are based on the excellent Whisper fine-tuning tutorial from HuggingFace `https://github.com/huggingface/community-events/tree/main/whisper-fine-tuning-event`
+More information on this project as well as the results can be found here: 
+`https://kb-labb.github.io/posts/2025-03-07-welcome-KB-Whisper/
+`
