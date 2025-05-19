@@ -32,7 +32,7 @@ torchrun \
         --node_rank=$SLURM_NODEID \
         --master_addr=$MASTER_ADDR \
         --master_port=$MASTER_PORT \
-        scripts/run_speech_recognition_seq2seq_streaming_bpe.py \
+        scripts/run_speech_recognition_seq2seq_streaming_bpe_previous.py \
         --deepspeed=$CONFIG_DIR"/ds_config_small.json" \
         --model_name_or_path="/leonardo_work/EUHPC_A01_006/models/whisper-small" \
         --node_id=$SLURM_NODEID \
